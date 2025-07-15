@@ -1,44 +1,57 @@
+use rayon::prelude::*;
 use std::io::Error;
-use std::net::ToSocketAddrs;
-use std::net::{SocketAddr, TcpStream};
-use std::time::Duration;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::time::Duration; // 引入并行处理库
 
 fn scan_port(host: &str, port: u16) -> Result<(), Error> {
-    let addr_str = format!("{}:{}", host, port); // 组合IP和端口
-    let timeout = Duration::from_secs(1);
-
-    // 解析带端口的完整地址
+    let addr_str = format!("{}:{}", host, port);
+    let timeout = Duration::from_millis(500); // 更短的超时时间
     let addrs: Vec<SocketAddr> = addr_str.to_socket_addrs()?.collect();
+
+    let mut result = None;
 
     for addr in addrs {
         match TcpStream::connect_timeout(&addr, timeout) {
             Ok(_) => {
-                println!("Port {}: open", port);
-                return Ok(());
+                result = Some(("open", port));
+                break;
             }
             Err(e) => match e.kind() {
-                std::io::ErrorKind::TimedOut => continue, // 尝试下一个地址
-                std::io::ErrorKind::ConnectionRefused => {
-                    println!("Port {}: closed", port);
-                    return Ok(());
+                std::io::ErrorKind::TimedOut => {
+                    // 继续尝试下一个地址
                 }
-                _ => continue, // 其他错误尝试下一个地址
+                std::io::ErrorKind::ConnectionRefused => {
+                    result = Some(("closed", port));
+                    break;
+                }
+                _ => {
+                    // 其他错误暂时忽略
+                }
             },
         }
     }
 
-    // 所有地址尝试失败
-    println!("Port {}: filtered or unreachable", port);
+    // 输出结果
+    match result {
+        Some(("open", p)) => println!("Port {}: open", p),
+        Some(("closed", p)) => println!("Port {}: closed", p),
+        _ => println!("Port {}: filtered or unreachable", port),
+    }
+
     Ok(())
 }
 
-// scan_ports 和 main 保持不变
 fn scan_ports(host: &str, start_port: u16, end_port: u16) -> Result<(), Error> {
-    for port in start_port..=end_port {
+    // 创建端口范围集合
+    let ports: Vec<u16> = (start_port..=end_port).collect();
+
+    // 使用并行迭代处理所有端口
+    ports.par_iter().for_each(|&port| {
         if let Err(e) = scan_port(host, port) {
             eprintln!("Error scanning port {}: {}", port, e);
         }
-    }
+    });
+
     Ok(())
 }
 
