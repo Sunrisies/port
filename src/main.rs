@@ -1,13 +1,14 @@
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::io::Error;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::Mutex;
+use std::sync::mpsc;
 use std::time::Duration;
 
 fn scan_port(host: &str, port: u16) -> Result<String, Error> {
     let addr_str = format!("{}:{}", host, port);
-    let timeout = Duration::from_millis(200); // 更短的超时时间
+    let timeout = Duration::from_millis(200);
     let addrs: Vec<SocketAddr> = addr_str.to_socket_addrs()?.collect();
 
     for addr in addrs {
@@ -26,19 +27,45 @@ fn scan_port(host: &str, port: u16) -> Result<String, Error> {
 
 fn scan_ports(host: &str, start_port: u16, end_port: u16) -> Result<(), Error> {
     let ports: Vec<u16> = (start_port..=end_port).collect();
+    let (tx, rx) = mpsc::channel();
 
-    // 使用线程安全的BTreeMap收集结果（自动按键排序）
-    let results = Mutex::new(BTreeMap::new());
-
-    ports.par_iter().for_each(|&port| {
+    // 使用并行迭代器发送结果
+    ports.par_iter().for_each_with(tx.clone(), |tx, &port| {
         let status = scan_port(host, port).unwrap_or_else(|e| format!("error: {}", e));
-        let mut map = results.lock().unwrap();
-        map.insert(port, status);
+        tx.send((port, status)).expect("Failed to send result");
     });
 
-    // 按端口顺序输出结果
-    let map = results.lock().unwrap();
-    for (port, status) in map.iter() {
+    // 释放发送端，这样接收端知道何时结束
+    drop(tx);
+
+    // 使用最小堆管理结果
+    let mut heap = BinaryHeap::new();
+    let mut next_expected = start_port;
+
+    for (port, status) in rx {
+        // 如果收到的是下一个期望的端口，直接输出
+        if port == next_expected {
+            println!("Port {}: {}", port, status);
+            next_expected += 1;
+
+            // 检查堆中是否有连续的端口可以输出
+            while let Some(Reverse((min_port, min_status))) = heap.peek() {
+                if *min_port == next_expected {
+                    println!("Port {}: {}", min_port, min_status);
+                    next_expected += 1;
+                    heap.pop();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            // 不是下一个期望的端口，加入最小堆
+            heap.push(Reverse((port, status)));
+        }
+    }
+
+    // 输出堆中剩余的结果（按顺序）
+    while let Some(Reverse((port, status))) = heap.pop() {
         println!("Port {}: {}", port, status);
     }
 
